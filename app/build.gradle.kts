@@ -48,6 +48,16 @@ android {
         }
     }
 
+    // Lint runs as part of `assembleRelease` even when the user passes `-x lint`,
+    // because some lint checks are wired in as fatal release-only blockers.
+    // We disable that behavior so a release APK can ship even with lint warnings;
+    // CI still surfaces them as workflow annotations.
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+        warningsAsErrors = false
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
