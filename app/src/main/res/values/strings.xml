@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MobileFTP</string>
+    <string name="tagline">Light-Speed File Transfer</string>
+    <string name="server_channel_name">FTP Server</string>
+    <string name="server_channel_description">Persistent notification while the FTP server is running</string>
+    <string name="transfer_channel_name">Transfers</string>
+    <string name="transfer_channel_description">Background file transfer progress</string>
+</resources>

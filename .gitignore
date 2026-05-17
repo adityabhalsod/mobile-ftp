@@ -1,0 +1,38 @@
+# Build outputs
+build/
+.gradle/
+app/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.kiro/
+
+# Local env / secrets — DO NOT commit
+local.properties
+device.ini
+keystore.properties
+*.keystore
+*.jks
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+hs_err_pid*
+
+# Node (for setup.js)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Captures from Android Studio
+captures/

@@ -1,0 +1,7 @@
+-keep class org.apache.ftpserver.** { *; }
+-keep class org.apache.commons.net.** { *; }
+-keep class net.jpountz.** { *; }
+-keep class org.lz4.** { *; }
+-dontwarn org.slf4j.**
+-dontwarn javax.naming.**
+-dontwarn org.apache.mina.**
