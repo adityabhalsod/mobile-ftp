@@ -75,8 +75,11 @@ fun ServerScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val colors = LocalRaycastColors.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     var qrExpanded by remember { mutableStateOf(false) }
     var configExpanded by remember { mutableStateOf(false) }
+    // Set when user taps "Open Settings"; cleared once we've evaluated the result.
+    var awaitingPermissionReturn by remember { mutableStateOf(false) }
 
     // Re-check MANAGE_EXTERNAL_STORAGE every time the activity resumes,
     // so returning from system Settings hides the warning banner immediately.
@@ -85,6 +88,22 @@ fun ServerScreen(
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshPermissions()
+                if (awaitingPermissionReturn) {
+                    awaitingPermissionReturn = false
+                    if (!com.mobileftp.util.PermissionUtils.hasManageStorage()) {
+                        android.widget.Toast.makeText(
+                            context,
+                            "All Files Access is still not allowed. Please enable it for MobileFTP.",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        android.widget.Toast.makeText(
+                            context,
+                            "All Files Access granted",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -101,7 +120,11 @@ fun ServerScreen(
         item { ServerHeader(themePreference, onToggleTheme) }
 
         if (!state.hasAllFilesAccess) {
-            item { AllFilesAccessBanner() }
+            item {
+                AllFilesAccessBanner(
+                    onOpenSettings = { awaitingPermissionReturn = true }
+                )
+            }
         }
 
         item {
@@ -615,7 +638,9 @@ private fun ConfigSection(
  * which is the empty folder users see in their FTP client.
  */
 @Composable
-private fun AllFilesAccessBanner() {
+private fun AllFilesAccessBanner(
+    onOpenSettings: () -> Unit
+) {
     val colors = LocalRaycastColors.current
     val context = LocalContext.current
     RaycastCard(
@@ -635,6 +660,8 @@ private fun AllFilesAccessBanner() {
             RaycastButton(
                 text = "Open Settings",
                 onClick = {
+                    // Tell the parent to start watching for the result.
+                    onOpenSettings()
                     val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         android.content.Intent(
                             android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
