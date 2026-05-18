@@ -92,8 +92,10 @@ class FtpConnectionPool(
 
     private fun createClient(): FTPClient {
         val client: FTPClient = if (profile.ftps) FTPSClient("TLS", false) else FTPClient()
-        SocketTuner.applyToFtpClient(client)
+        SocketTuner.preConnect(client)
         client.connect(profile.host, profile.port)
+        // Socket-level options can only be set once the socket actually exists.
+        SocketTuner.postConnect(client)
         if (!client.login(profile.username, profile.password)) {
             runCatching { client.disconnect() }
             error("FTP login failed for ${profile.username}@${profile.host}")

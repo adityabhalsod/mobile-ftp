@@ -10,11 +10,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
@@ -34,6 +38,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.mobileftp.domain.model.ConnectionProfile
@@ -240,9 +246,16 @@ private fun ConnectionSheet(
     var ftps by remember { mutableStateOf(existing?.ftps ?: false) }
     var chunks by remember { mutableStateOf((existing?.chunkCount ?: 8).toString()) }
 
+    // Save is only enabled with the bare minimum to attempt a connection.
+    val canSave = host.isNotBlank() && (port.toIntOrNull() ?: 0) in 1..65535
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            // Push content above the system keyboard + nav bar so the Save button is reachable.
+            .imePadding()
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(RaycastSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(RaycastSpacing.md)
     ) {
@@ -250,29 +263,68 @@ private fun ConnectionSheet(
             if (existing == null) "New Connection" else "Edit Connection",
             style = RaycastType.HeadlineMedium.copy(color = colors.TextPrimary)
         )
-        RaycastInput(value = name, onValueChange = { name = it }, label = "Profile name", placeholder = "Home NAS")
-        RaycastInput(value = host, onValueChange = { host = it }, label = "Host", placeholder = "192.168.1.10")
-        Row(horizontalArrangement = Arrangement.spacedBy(RaycastSpacing.md)) {
+
+        RaycastInput(
+            value = name,
+            onValueChange = { name = it },
+            label = "Profile name",
+            placeholder = "Home NAS",
+            imeAction = ImeAction.Next,
+            modifier = Modifier.fillMaxWidth()
+        )
+        RaycastInput(
+            value = host,
+            onValueChange = { host = it },
+            label = "Host",
+            placeholder = "192.168.1.10",
+            keyboardType = KeyboardType.Uri,
+            imeAction = ImeAction.Next,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(RaycastSpacing.md)
+        ) {
             RaycastInput(
                 value = port,
-                onValueChange = { port = it.filter { c -> c.isDigit() } },
+                onValueChange = { port = it.filter { c -> c.isDigit() }.take(5) },
                 label = "Port",
+                placeholder = "21",
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Next,
                 modifier = Modifier.weight(1f)
             )
             RaycastInput(
                 value = chunks,
-                onValueChange = { chunks = it.filter { c -> c.isDigit() } },
+                onValueChange = { chunks = it.filter { c -> c.isDigit() }.take(2) },
                 label = "Chunks",
+                placeholder = "8",
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Next,
                 modifier = Modifier.weight(1f)
             )
         }
-        RaycastInput(value = username, onValueChange = { username = it }, label = "Username")
-        RaycastInput(value = password, onValueChange = { password = it }, label = "Password", isPassword = true)
+        RaycastInput(
+            value = username,
+            onValueChange = { username = it },
+            label = "Username",
+            placeholder = "anonymous",
+            imeAction = ImeAction.Next,
+            modifier = Modifier.fillMaxWidth()
+        )
+        RaycastInput(
+            value = password,
+            onValueChange = { password = it },
+            label = "Password",
+            isPassword = true,
+            imeAction = ImeAction.Done,
+            modifier = Modifier.fillMaxWidth()
+        )
 
-        SettingRow(label = "PASV Mode", trailing = {
+        SettingRow(label = "PASV Mode", description = "Recommended for most networks", trailing = {
             RaycastSwitch(checked = passive, onCheckedChange = { passive = it })
         })
-        SettingRow(label = "FTPS (TLS)", trailing = {
+        SettingRow(label = "FTPS (TLS)", description = "Encrypt control & data channels", trailing = {
             RaycastSwitch(checked = ftps, onCheckedChange = { ftps = it })
         })
 
@@ -293,8 +345,8 @@ private fun ConnectionSheet(
                         ConnectionProfile(
                             id = existing?.id ?: 0L,
                             name = name.ifBlank { host },
-                            host = host,
-                            port = port.toIntOrNull() ?: 21,
+                            host = host.trim(),
+                            port = port.toIntOrNull()?.coerceIn(1, 65535) ?: 21,
                             username = username,
                             password = password,
                             passive = passive,
@@ -304,6 +356,8 @@ private fun ConnectionSheet(
                         )
                     )
                 },
+                style = RaycastButtonStyle.Primary,
+                enabled = canSave,
                 modifier = Modifier.weight(1f)
             )
         }

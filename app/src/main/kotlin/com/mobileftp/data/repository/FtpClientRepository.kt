@@ -116,7 +116,7 @@ class FtpClientRepository @Inject constructor() {
     /** Build a one-shot client (for control queries outside the pool). */
     fun newControlClient(profile: ConnectionProfile): FTPClient {
         val client: FTPClient = if (profile.ftps) FTPSClient("TLS", false) else FTPClient()
-        SocketTuner.applyToFtpClient(client)
+        SocketTuner.preConnect(client)
         return client
     }
 
