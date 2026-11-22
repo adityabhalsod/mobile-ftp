@@ -79,8 +79,14 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
 
       # ── Setup Android SDK ─────────────────────────────────────────────
+      # The action's default package list includes the legacy "tools" package,
+      # which current sdkmanager (cmdline-tools 16+) no longer provides, so the
+      # step failed with "Failed to find package 'tools'". Install only what the
+      # build needs (compileSdk 34).
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
       # ── Cache Gradle wrapper & dependencies ───────────────────────────
       - name: Cache Gradle dependencies
