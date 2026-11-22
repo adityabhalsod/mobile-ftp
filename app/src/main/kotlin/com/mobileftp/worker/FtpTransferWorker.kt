@@ -81,10 +81,11 @@ class FtpTransferWorker @AssistedInject constructor(
             // P7: build / resume chunks list
             val existingChunks = transferRepository.listChunks(jobId)
             val chunks = if (existingChunks.isEmpty()) {
-                buildChunks(jobId, job.totalBytes, job.chunkCount).also {
-                    transferRepository.saveChunks(it)
-                }
-            } else existingChunks
+                transferRepository.saveChunks(buildChunks(jobId, job.totalBytes, job.chunkCount))
+                // Re-read so every chunk carries its generated row id; the freshly built
+                // list had id = 0, so per-chunk progress/MD5 updates never hit a row.
+                transferRepository.listChunks(jobId).sortedBy { it.index }
+            } else existingChunks.sortedBy { it.index }
             val chunkOffsets = chunks.map { it.startOffset + it.transferredBytes }
 
             // P10: progress checkpoint loop — every 2s persist + emit progress
@@ -144,12 +145,17 @@ class FtpTransferWorker @AssistedInject constructor(
             transferRepository.setProgress(jobId, totalTransferred)
             transferRepository.setJobState(jobId, TransferState.COMPLETED)
             return Result.success(workDataOf(KEY_BYTES to totalTransferred))
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // Cancelled from the Transfers screen (which already set CANCELLED) or stopped by
+            // WorkManager — don't overwrite the state with FAILED.
+            throw c
         } catch (t: Throwable) {
-            transferRepository.setJobState(jobId, TransferState.FAILED, t.message)
+            transferRepository.setJobState(jobId, TransferState.FAILED, com.mobileftp.util.FtpErrors.describe(t))
             return Result.failure(workDataOf(KEY_ERROR to (t.message ?: "Transfer error")))
         } finally {
             throughput.stop()
-            pool.closeAll()
+            // Close sockets even when the work was cancelled.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { pool.closeAll() }
             checkpointScope.cancel()
         }
     }

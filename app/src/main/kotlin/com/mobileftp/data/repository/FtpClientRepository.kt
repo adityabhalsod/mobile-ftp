@@ -12,6 +12,8 @@ import kotlinx.coroutines.withContext
 import org.apache.commons.net.ftp.FTP
 import org.apache.commons.net.ftp.FTPClient
 import org.apache.commons.net.ftp.FTPFile
+import org.apache.commons.net.ftp.FTPReply
+import com.mobileftp.util.FtpClientException
 import org.apache.commons.net.ftp.FTPSClient
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -51,11 +53,20 @@ class FtpClientRepository @Inject constructor() {
     }
 
     suspend fun list(path: String): List<RemoteFile> = withContext(Dispatchers.IO) {
-        val activePool = pool ?: error("Not connected")
+        val activePool = pool ?: throw FtpClientException("Not connected")
         val client = activePool.borrow()
         try {
-            client.changeWorkingDirectory(path)
-            val files: Array<FTPFile> = client.listFiles(path) ?: emptyArray()
+            // A failed CWD used to be ignored, so a missing / forbidden folder silently
+            // showed as "Empty directory". Surface the server's reason instead.
+            if (!client.changeWorkingDirectory(path)) {
+                throw FtpClientException("Cannot open $path: ${client.replyString?.trim().orEmpty()}")
+            }
+            // List the working directory (no path argument) so names containing spaces
+            // or glob characters aren't misinterpreted by the server.
+            val files: Array<FTPFile> = client.listFiles() ?: emptyArray()
+            if (!FTPReply.isPositiveCompletion(client.replyCode)) {
+                throw FtpClientException("Listing failed: ${client.replyString?.trim().orEmpty()}")
+            }
             _currentDirectory.value = path
             files
                 .filter { it.name != "." && it.name != ".." }
@@ -67,11 +78,11 @@ class FtpClientRepository @Inject constructor() {
     }
 
     suspend fun mkdir(path: String, name: String): Boolean = withContext(Dispatchers.IO) {
-        val activePool = pool ?: error("Not connected")
+        val activePool = pool ?: throw FtpClientException("Not connected")
         val client = activePool.borrow()
         try {
             val full = joinPath(path, name)
-            client.makeDirectory(full)
+            client.makeDirectory(full).also { ok -> if (!ok) throw replyError(client, "Create folder failed") }
         } finally {
             activePool.release(client)
         }
@@ -79,20 +90,23 @@ class FtpClientRepository @Inject constructor() {
 
     suspend fun rename(path: String, oldName: String, newName: String): Boolean =
         withContext(Dispatchers.IO) {
-            val activePool = pool ?: error("Not connected")
+            val activePool = pool ?: throw FtpClientException("Not connected")
             val client = activePool.borrow()
             try {
                 client.rename(joinPath(path, oldName), joinPath(path, newName))
+                    .also { ok -> if (!ok) throw replyError(client, "Rename failed") }
             } finally {
                 activePool.release(client)
             }
         }
 
     suspend fun delete(file: RemoteFile): Boolean = withContext(Dispatchers.IO) {
-        val activePool = pool ?: error("Not connected")
+        val activePool = pool ?: throw FtpClientException("Not connected")
         val client = activePool.borrow()
         try {
-            if (file.isDirectory) client.removeDirectory(file.path) else client.deleteFile(file.path)
+            val ok = if (file.isDirectory) client.removeDirectory(file.path) else client.deleteFile(file.path)
+            if (!ok) throw replyError(client, "Delete ${file.name} failed")
+            ok
         } finally {
             activePool.release(client)
         }
@@ -100,7 +114,7 @@ class FtpClientRepository @Inject constructor() {
 
     /** One-off plain client for size queries, etc. */
     suspend fun fetchSize(remotePath: String): Long = withContext(Dispatchers.IO) {
-        val activePool = pool ?: error("Not connected")
+        val activePool = pool ?: throw FtpClientException("Not connected")
         val client = activePool.borrow()
         try {
             client.setFileType(FTP.BINARY_FILE_TYPE)
@@ -144,6 +158,9 @@ class FtpClientRepository @Inject constructor() {
         }
         return sb.toString()
     }
+
+    private fun replyError(client: FTPClient, prefix: String): FtpClientException =
+        FtpClientException("$prefix: ${client.replyString?.trim().orEmpty().ifEmpty { "server refused" }}")
 
     private fun joinPath(parent: String, name: String): String {
         val p = if (parent.endsWith("/")) parent else "$parent/"

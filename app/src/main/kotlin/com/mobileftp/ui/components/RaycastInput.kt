@@ -49,6 +49,7 @@ import com.mobileftp.ui.theme.RaycastType
  * - 8dp radius, 48dp height.
  * - Optional label above (LabelMono TextSecondary), prefix icon, trailing slot.
  * - When [isPassword] is true, a built-in eye icon toggles visibility.
+ * - When [error] is non-null the border turns red and the message is shown below.
  */
 @Composable
 fun RaycastInput(
@@ -64,6 +65,7 @@ fun RaycastInput(
     singleLine: Boolean = true,
     enabled: Boolean = true,
     readOnly: Boolean = false,
+    error: String? = null,
     trailing: (@Composable () -> Unit)? = null
 ) {
     val colors = LocalRaycastColors.current
@@ -71,7 +73,11 @@ fun RaycastInput(
     val focused by interactionSource.collectIsFocusedAsState()
 
     val borderColor by animateColorAsState(
-        targetValue = if (focused) colors.BorderFocus else colors.BorderDefault,
+        targetValue = when {
+            error != null -> colors.AccentStart
+            focused -> colors.BorderFocus
+            else -> colors.BorderDefault
+        },
         animationSpec = tween(120),
         label = "input-border"
     )
@@ -97,7 +103,7 @@ fun RaycastInput(
                 .fillMaxWidth()
                 .height(48.dp)
                 .clip(shape)
-                .background(colors.SurfaceCard)
+                .background(if (enabled) colors.SurfaceCard else colors.SurfaceCard.copy(alpha = 0.5f))
                 .border(1.dp, borderColor, shape)
                 .padding(horizontal = RaycastSpacing.md),
             verticalAlignment = Alignment.CenterVertically,
@@ -156,6 +162,13 @@ fun RaycastInput(
                     modifier = Modifier.padding(start = RaycastSpacing.sm)
                 ) { trailing() }
             }
+        }
+        if (error != null) {
+            Text(
+                error,
+                style = RaycastType.MetaMono.copy(color = colors.AccentStart),
+                modifier = Modifier.padding(top = RaycastSpacing.xs, start = RaycastSpacing.xs)
+            )
         }
     }
 }

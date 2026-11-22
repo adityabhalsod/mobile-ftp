@@ -9,7 +9,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.apache.ftpserver.DataConnectionConfigurationFactory
 import org.apache.ftpserver.FtpServer
 import org.apache.ftpserver.FtpServerFactory
 import org.apache.ftpserver.ftplet.Authority
@@ -37,7 +40,16 @@ data class ConnectedClient(
 class FtpServerRepository @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
+    @Volatile
     private var ftpServer: FtpServer? = null
+
+    /**
+     * Serialises start/stop. Without it, tapping Start repeatedly (or Start
+     * then Stop quickly) ran several start() calls in parallel: they raced to
+     * bind the same port, one failed with "Address already in use", and the
+     * service tore itself down into the ERROR state.
+     */
+    private val lifecycleMutex = Mutex()
 
     private val _status = MutableStateFlow(ServerStatus.STOPPED)
     val status: StateFlow<ServerStatus> = _status.asStateFlow()
@@ -55,6 +67,10 @@ class FtpServerRepository @Inject constructor(
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     suspend fun start(config: ServerConfig): Result<Unit> = withContext(Dispatchers.IO) {
+        lifecycleMutex.withLock { startLocked(config) }
+    }
+
+    private fun startLocked(config: ServerConfig): Result<Unit> =
         runCatching {
             stopInternal()
             _status.value = ServerStatus.STARTING
@@ -67,6 +83,12 @@ class FtpServerRepository @Inject constructor(
             val listenerFactory = ListenerFactory().apply {
                 port = config.port
                 idleTimeout = 300
+                // Previously the PASV range from the config screen was never applied.
+                if (config.pasvPortStart in 1024..65535 && config.pasvPortEnd >= config.pasvPortStart) {
+                    dataConnectionConfiguration = DataConnectionConfigurationFactory().apply {
+                        passivePorts = "${config.pasvPortStart}-${config.pasvPortEnd.coerceAtMost(65535)}"
+                    }.createDataConnectionConfiguration()
+                }
             }
             serverFactory.addListener("default", listenerFactory.createListener())
 
@@ -111,13 +133,25 @@ class FtpServerRepository @Inject constructor(
             _status.value = ServerStatus.RUNNING
             _lastError.value = null
         }.onFailure {
+            ftpServer?.let { s -> runCatching { s.stop() } }
+            ftpServer = null
             _status.value = ServerStatus.ERROR
-            _lastError.value = it.message
+            _lastError.value = friendlyStartError(it, config)
         }
-    }
 
     suspend fun stop(): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching { stopInternal() }
+        lifecycleMutex.withLock { runCatching { stopInternal() } }
+    }
+
+    private fun friendlyStartError(t: Throwable, config: ServerConfig): String {
+        val chain = generateSequence(t) { it.cause }.toList()
+        return when {
+            chain.any { it is java.net.BindException } ->
+                "Port ${config.port} is already in use. Choose another port."
+            chain.any { it is SecurityException || it.message?.contains("EACCES") == true } ->
+                "Permission denied for port ${config.port}. Use a port between 1024 and 65535."
+            else -> t.message ?: t.javaClass.simpleName
+        }
     }
 
     private fun stopInternal() {

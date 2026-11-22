@@ -18,8 +18,12 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideSettingsStore(@ApplicationContext context: Context): SettingsStore =
-        SettingsStore(context)
+    fun provideSettingsStore(
+        @ApplicationContext context: Context,
+        securePreferences: dagger.Lazy<SecurePreferences>
+    ): SettingsStore =
+        // Share the single encrypted-prefs instance; opened lazily on first use (off main thread).
+        SettingsStore(context) { securePreferences.get() }
 
     @Provides
     @Singleton

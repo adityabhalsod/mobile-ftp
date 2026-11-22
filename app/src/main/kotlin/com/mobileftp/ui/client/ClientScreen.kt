@@ -24,8 +24,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -39,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -55,6 +58,7 @@ import com.mobileftp.ui.theme.RaycastShapes
 import com.mobileftp.ui.theme.RaycastSpacing
 import com.mobileftp.ui.theme.RaycastType
 import com.mobileftp.ui.theme.flameGradient
+import com.mobileftp.util.ConfigValidators
 import com.mobileftp.util.HumanReadableUtils
 
 @Composable
@@ -77,7 +81,13 @@ fun ClientScreen(
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(RaycastSpacing.lg),
+            // Extra bottom padding so the FAB never covers the last card's Connect button.
+            contentPadding = PaddingValues(
+                start = RaycastSpacing.lg,
+                end = RaycastSpacing.lg,
+                top = RaycastSpacing.lg,
+                bottom = 96.dp
+            ),
             verticalArrangement = Arrangement.spacedBy(RaycastSpacing.md)
         ) {
             item {
@@ -109,8 +119,9 @@ fun ClientScreen(
                         profile = profile,
                         onConnect = { viewModel.connect(profile) },
                         onEdit = { viewModel.openSheet(profile) },
-                        onDelete = { viewModel.deleteProfile(profile) },
-                        connecting = state.connecting
+                        onDelete = { viewModel.requestDelete(profile) },
+                        connecting = state.connectingProfileId == profile.id,
+                        anyConnecting = state.connecting
                     )
                 }
             }
@@ -118,9 +129,13 @@ fun ClientScreen(
                 item {
                     RaycastCard(
                         modifier = Modifier.fillMaxWidth(),
-                        background = colors.AccentStart.copy(alpha = 0.10f)
+                        background = colors.AccentStart.copy(alpha = 0.10f),
+                        onClick = { viewModel.dismissError() }
                     ) {
-                        Text(err, style = RaycastType.BodySmall.copy(color = colors.AccentStart))
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(err, style = RaycastType.BodySmall.copy(color = colors.AccentStart))
+                            Text("Tap to dismiss", style = RaycastType.MetaMono.copy(color = colors.TextTertiary))
+                        }
                     }
                 }
             }
@@ -137,7 +152,16 @@ fun ClientScreen(
     }
 
     if (state.showSheet) {
-        val sheetState = rememberModalBottomSheetState()
+        // Open fully expanded: the half-expanded state hid the Save button and,
+        // combined with the keyboard, made the lower fields impossible to reach.
+        val savingNow by androidx.compose.runtime.rememberUpdatedState(state.saving)
+        val sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            confirmValueChange = { target ->
+                // Don't let a drag dismiss the sheet while a save is in flight.
+                !(target == SheetValue.Hidden && savingNow)
+            }
+        )
         ModalBottomSheet(
             onDismissRequest = { viewModel.closeSheet() },
             sheetState = sheetState,
@@ -146,10 +170,29 @@ fun ClientScreen(
         ) {
             ConnectionSheet(
                 existing = state.editingProfile,
+                saving = state.saving,
+                externalError = state.sheetError,
                 onSave = { viewModel.saveProfile(it) },
                 onDismiss = { viewModel.closeSheet() }
             )
         }
+    }
+
+    state.pendingDelete?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { viewModel.cancelDelete() },
+            containerColor = colors.SurfaceElevated,
+            titleContentColor = colors.TextPrimary,
+            textContentColor = colors.TextSecondary,
+            title = { Text("Delete connection?", style = RaycastType.HeadlineMedium) },
+            text = { Text("\"${profile.name}\" (${profile.host}:${profile.port}) will be removed.", style = RaycastType.BodySmall) },
+            confirmButton = {
+                RaycastButton(text = "Delete", onClick = { viewModel.confirmDelete() }, style = RaycastButtonStyle.Destructive)
+            },
+            dismissButton = {
+                RaycastButton(text = "Cancel", onClick = { viewModel.cancelDelete() }, style = RaycastButtonStyle.Secondary)
+            }
+        )
     }
 }
 
@@ -178,7 +221,8 @@ private fun ProfileCard(
     onConnect: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    connecting: Boolean
+    connecting: Boolean,
+    anyConnecting: Boolean
 ) {
     val colors = LocalRaycastColors.current
     RaycastCard(modifier = Modifier.fillMaxWidth()) {
@@ -188,23 +232,33 @@ private fun ProfileCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(profile.name, style = RaycastType.HeadlineMedium.copy(color = colors.TextPrimary))
+                // weight(1f) + ellipsis: long names/hosts used to push the Edit/Delete buttons off-screen.
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
-                        "${profile.host}:${profile.port}",
-                        style = RaycastType.LabelMono.copy(color = colors.TextSecondary)
+                        profile.name,
+                        style = RaycastType.HeadlineMedium.copy(color = colors.TextPrimary),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${profile.host}:${profile.port}" + if (profile.ftps) " · FTPS" else "",
+                        style = RaycastType.LabelMono.copy(color = colors.TextSecondary),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RaycastButton(
                         text = "Edit",
                         onClick = onEdit,
+                        enabled = !connecting,
                         style = RaycastButtonStyle.Secondary,
                         leading = { Icon(Icons.Filled.Edit, null, modifier = Modifier.size(14.dp)) }
                     )
                     RaycastButton(
                         text = "Delete",
                         onClick = onDelete,
+                        enabled = !connecting,
                         style = RaycastButtonStyle.Destructive,
                         leading = { Icon(Icons.Filled.Delete, null, modifier = Modifier.size(14.dp)) }
                     )
@@ -216,14 +270,19 @@ private fun ProfileCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Last connected ${HumanReadableUtils.relative(profile.lastConnectedAt)}",
-                    style = RaycastType.MetaMono.copy(color = colors.TextTertiary)
+                    if (profile.lastConnectedAt > 0L)
+                        "Last connected ${HumanReadableUtils.relative(profile.lastConnectedAt)}"
+                    else "Never connected",
+                    style = RaycastType.MetaMono.copy(color = colors.TextTertiary),
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 RaycastButton(
                     text = if (connecting) "Connecting…" else "Connect",
                     onClick = onConnect,
                     style = RaycastButtonStyle.Primary,
-                    enabled = !connecting
+                    enabled = !anyConnecting
                 )
             }
         }
@@ -233,21 +292,37 @@ private fun ProfileCard(
 @Composable
 private fun ConnectionSheet(
     existing: ConnectionProfile?,
+    saving: Boolean,
+    externalError: String?,
     onSave: (ConnectionProfile) -> Unit,
     onDismiss: () -> Unit
 ) {
     val colors = LocalRaycastColors.current
-    var name by remember { mutableStateOf(existing?.name ?: "") }
-    var host by remember { mutableStateOf(existing?.host ?: "") }
-    var port by remember { mutableStateOf((existing?.port ?: 21).toString()) }
-    var username by remember { mutableStateOf(existing?.username ?: "") }
-    var password by remember { mutableStateOf(existing?.password ?: "") }
-    var passive by remember { mutableStateOf(existing?.passive ?: true) }
-    var ftps by remember { mutableStateOf(existing?.ftps ?: false) }
-    var chunks by remember { mutableStateOf((existing?.chunkCount ?: 8).toString()) }
+    // Keyed on the profile id so switching between "New" and "Edit X" never
+    // shows stale values from the previously edited profile.
+    val key = existing?.id ?: -1L
+    var name by remember(key) { mutableStateOf(existing?.name ?: "") }
+    var host by remember(key) { mutableStateOf(existing?.host ?: "") }
+    var port by remember(key) { mutableStateOf((existing?.port ?: 21).toString()) }
+    var username by remember(key) { mutableStateOf(existing?.username ?: "") }
+    var password by remember(key) { mutableStateOf(existing?.password ?: "") }
+    var passive by remember(key) { mutableStateOf(existing?.passive ?: true) }
+    var ftps by remember(key) { mutableStateOf(existing?.ftps ?: false) }
+    var chunks by remember(key) {
+        mutableStateOf((existing?.chunkCount ?: 8).coerceIn(ConfigValidators.MIN_CHUNKS, ConfigValidators.MAX_CHUNKS).toString())
+    }
+    // Errors appear once a field has been edited, or for every field after a Save attempt.
+    var touched by remember(key) { mutableStateOf(setOf<String>()) }
+    var submitted by remember(key) { mutableStateOf(false) }
+    fun show(field: String, error: String?) = if (submitted || field in touched) error else null
 
-    // Save is only enabled with the bare minimum to attempt a connection.
-    val canSave = host.isNotBlank() && (port.toIntOrNull() ?: 0) in 1..65535
+    val nameError = ConfigValidators.validateProfileName(name)
+    val hostError = ConfigValidators.validateHost(host)
+    val portError = ConfigValidators.validatePort(port)
+    val chunksError = ConfigValidators.validateChunks(chunks)
+    val usernameError = ConfigValidators.validateClientUsername(username)
+    val passwordError = ConfigValidators.validateClientPassword(password)
+    val isValid = listOf(nameError, hostError, portError, chunksError, usernameError, passwordError).all { it == null }
 
     Column(
         modifier = Modifier
@@ -266,19 +341,36 @@ private fun ConnectionSheet(
 
         RaycastInput(
             value = name,
-            onValueChange = { name = it },
+            onValueChange = { name = it.take(ConfigValidators.MAX_PROFILE_NAME); touched = touched + "name" },
             label = "Profile name",
             placeholder = "Home NAS",
             imeAction = ImeAction.Next,
+            enabled = !saving,
+            error = show("name", nameError),
             modifier = Modifier.fillMaxWidth()
         )
         RaycastInput(
             value = host,
-            onValueChange = { host = it },
+            onValueChange = { raw ->
+                // Accept pasted URLs like ftp://user@192.168.1.10:2121/path — keep only the host
+                // and move an embedded port into the Port field.
+                // Only on paste / URL input, so typing an IPv6 address isn't rewritten mid-way.
+                val pasted = raw.length - host.length > 1 || raw.contains("://")
+                if (pasted) {
+                    val (cleanHost, embeddedPort) = ConfigValidators.normalizeHost(raw)
+                    host = cleanHost
+                    if (embeddedPort != null && embeddedPort in 1..65535) port = embeddedPort.toString()
+                } else {
+                    host = raw.trimStart()
+                }
+                touched = touched + "host"
+            },
             label = "Host",
             placeholder = "192.168.1.10",
             keyboardType = KeyboardType.Uri,
             imeAction = ImeAction.Next,
+            enabled = !saving,
+            error = show("host", hostError),
             modifier = Modifier.fillMaxWidth()
         )
         Row(
@@ -287,46 +379,64 @@ private fun ConnectionSheet(
         ) {
             RaycastInput(
                 value = port,
-                onValueChange = { port = it.filter { c -> c.isDigit() }.take(5) },
+                onValueChange = { port = it.filter { c -> c.isDigit() }.take(5); touched = touched + "port" },
                 label = "Port",
                 placeholder = "21",
                 keyboardType = KeyboardType.Number,
                 imeAction = ImeAction.Next,
+                enabled = !saving,
+                error = show("port", portError),
                 modifier = Modifier.weight(1f)
             )
             RaycastInput(
                 value = chunks,
-                onValueChange = { chunks = it.filter { c -> c.isDigit() }.take(2) },
+                onValueChange = { chunks = it.filter { c -> c.isDigit() }.take(2); touched = touched + "chunks" },
                 label = "Chunks",
                 placeholder = "8",
                 keyboardType = KeyboardType.Number,
                 imeAction = ImeAction.Next,
+                enabled = !saving,
+                error = show("chunks", chunksError),
                 modifier = Modifier.weight(1f)
             )
         }
         RaycastInput(
             value = username,
-            onValueChange = { username = it },
+            onValueChange = { username = it.take(ConfigValidators.MAX_USERNAME); touched = touched + "username" },
             label = "Username",
             placeholder = "anonymous",
             imeAction = ImeAction.Next,
+            enabled = !saving,
+            error = show("username", usernameError),
             modifier = Modifier.fillMaxWidth()
         )
         RaycastInput(
             value = password,
-            onValueChange = { password = it },
+            onValueChange = { password = it.take(ConfigValidators.MAX_PASSWORD); touched = touched + "password" },
             label = "Password",
             isPassword = true,
             imeAction = ImeAction.Done,
+            enabled = !saving,
+            error = show("password", passwordError),
             modifier = Modifier.fillMaxWidth()
         )
+        if (username.isBlank()) {
+            Text(
+                "Leave username empty to log in anonymously.",
+                style = RaycastType.MetaMono.copy(color = colors.TextTertiary)
+            )
+        }
 
         SettingRow(label = "PASV Mode", description = "Recommended for most networks", trailing = {
-            RaycastSwitch(checked = passive, onCheckedChange = { passive = it })
+            RaycastSwitch(checked = passive, onCheckedChange = { passive = it }, enabled = !saving)
         })
-        SettingRow(label = "FTPS (TLS)", description = "Encrypt control & data channels", trailing = {
-            RaycastSwitch(checked = ftps, onCheckedChange = { ftps = it })
+        SettingRow(label = "FTPS (TLS)", description = "Explicit TLS — encrypts control & data channels", trailing = {
+            RaycastSwitch(checked = ftps, onCheckedChange = { ftps = it }, enabled = !saving)
         })
+
+        externalError?.let {
+            Text(it, style = RaycastType.BodySmall.copy(color = colors.AccentStart))
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -336,32 +446,35 @@ private fun ConnectionSheet(
                 text = "Cancel",
                 onClick = onDismiss,
                 style = RaycastButtonStyle.Secondary,
+                enabled = !saving,
                 modifier = Modifier.weight(1f)
             )
             RaycastButton(
-                text = "Save",
+                text = if (saving) "Saving…" else "Save",
                 onClick = {
+                    submitted = true
+                    if (!isValid) return@RaycastButton
+                    val cleanHost = host.trim()
                     onSave(
                         ConnectionProfile(
                             id = existing?.id ?: 0L,
-                            name = name.ifBlank { host },
-                            host = host.trim(),
-                            port = port.toIntOrNull()?.coerceIn(1, 65535) ?: 21,
-                            username = username,
+                            name = name.trim().ifBlank { cleanHost },
+                            host = cleanHost,
+                            port = port.trim().toInt(),
+                            username = username.trim(),
                             password = password,
                             passive = passive,
                             ftps = ftps,
-                            chunkCount = chunks.toIntOrNull()?.coerceIn(2, 32) ?: 8,
+                            chunkCount = chunks.trim().toInt(),
                             lastConnectedAt = existing?.lastConnectedAt ?: 0L
                         )
                     )
                 },
                 style = RaycastButtonStyle.Primary,
-                enabled = canSave,
+                // Keep Save tappable when invalid so the tap reveals every field error.
+                enabled = !saving,
                 modifier = Modifier.weight(1f)
             )
         }
     }
 }
-
-
