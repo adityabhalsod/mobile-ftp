@@ -2,6 +2,7 @@ package com.mobileftp.network
 
 import com.mobileftp.domain.model.ChunkProgress
 import com.mobileftp.domain.model.ChunkState
+import com.mobileftp.util.FtpClientException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -45,6 +46,10 @@ class ChunkTransferEngine(
     /**
      * Download a remote file by splitting it into [chunkCount] parallel ranges.
      * Returns total bytes transferred.
+     *
+     * Throws instead of returning early when the server refuses the file or the data
+     * connection ends before every byte arrived, so the caller never marks a job
+     * COMPLETED with missing data (issue #3).
      */
     suspend fun download(
         remotePath: String,
@@ -54,9 +59,15 @@ class ChunkTransferEngine(
         startOffsets: List<Long>? = null,
         onChunkComplete: suspend (index: Int, md5: String) -> Unit = { _, _ -> }
     ): Long = coroutineScope {
-        val ranges = computeRanges(totalBytes, chunkCount, startOffsets)
+        // A size of 0 from the directory listing may just mean the listing didn't
+        // report one. Ask the server; only a confirmed empty file is "done" with 0 bytes.
+        val size = if (totalBytes > 0L) totalBytes else remoteSize(remotePath)
+        if (size < 0L) {
+            throw FtpClientException("Couldn't read the size of $remotePath from the server.")
+        }
+        val ranges = computeRanges(size, chunkCount, startOffsets)
         publishInitial(ranges)
-        ensureFileLength(localFile, totalBytes)
+        ensureFileLength(localFile, size)
 
         val results = ranges.mapIndexed { index, range ->
             async(ioDispatcher) {
@@ -89,6 +100,25 @@ class ChunkTransferEngine(
         transferred
     }
 
+    /** Asks the server for the file size (SIZE, then MLST). Returns -1 when it can't tell. */
+    private suspend fun remoteSize(remotePath: String): Long = withContext(ioDispatcher) {
+        val client = pool.borrow()
+        try {
+            client.setFileType(org.apache.commons.net.ftp.FTP.BINARY_FILE_TYPE)
+            val viaSize = runCatching {
+                if (client.sendCommand("SIZE", remotePath) in 200..299) {
+                    client.replyString.trim().substringAfter(" ").trim().toLongOrNull()
+                } else null
+            }.getOrNull()
+            viaSize ?: runCatching { client.mlistFile(remotePath)?.size }.getOrNull()?.takeIf { it >= 0L } ?: -1L
+        } finally {
+            pool.release(client)
+        }
+    }
+
+    /** Number of bytes in an end-exclusive range built with `until`. */
+    private val LongRange.byteCount: Long get() = (last - first + 1L).coerceAtLeast(0L)
+
     private fun computeRanges(
         totalBytes: Long,
         chunkCount: Int,
@@ -117,7 +147,7 @@ class ChunkTransferEngine(
                 index = i,
                 state = ChunkState.PENDING,
                 transferredBytes = 0L,
-                totalBytes = r.last - r.first,
+                totalBytes = r.byteCount,
                 speedBytesPerSec = 0L
             )
         }
@@ -143,14 +173,26 @@ class ChunkTransferEngine(
         try {
             updateChunk(index) { it.copy(state = ChunkState.ACTIVE) }
             client.bufferSize = bufferEngine.bufferSize()
-            client.restartOffset = range.first
             client.setFileType(org.apache.commons.net.ftp.FTP.BINARY_FILE_TYPE)
 
-            val length = range.last - range.first
+            // Ranges are end-exclusive (`start until end`); `last - first` dropped the
+            // final byte of every chunk.
+            val length = range.byteCount
+            if (length == 0L) {
+                updateChunk(index) { it.copy(state = ChunkState.DONE) }
+                return@withContext 0L
+            }
+            client.restartOffset = range.first
             val digest = MessageDigest.getInstance("MD5")
             val chunkStart = System.currentTimeMillis()
 
-            client.retrieveFileStream(remotePath)?.use { input ->
+            // A null stream means the server refused RETR (or REST). This used to be
+            // skipped silently and the job was reported as completed with no data.
+            val stream = client.retrieveFileStream(remotePath)
+                ?: throw FtpClientException(
+                    "Server refused to send $remotePath: ${client.replyString?.trim().orEmpty()}"
+                )
+            stream.use { input ->
                 RandomAccessFile(localFile, "rw").use { raf ->
                     val channel: FileChannel = raf.channel
                     channel.position(range.first)
@@ -178,7 +220,18 @@ class ChunkTransferEngine(
                     }
                 }
             }
-            client.completePendingCommand()
+            // A chunk that stops before the end of the file closes the data connection
+            // early, so the server answers 426 here; that's expected. Any other failure
+            // leaves the control connection in an unknown state, so drop it from the pool.
+            val finished = runCatching { client.completePendingCommand() }.getOrDefault(false)
+            if (!finished) runCatching { client.disconnect() }
+
+            if (transferred < length) {
+                throw FtpClientException(
+                    "Download of $remotePath stopped after $transferred of $length bytes" +
+                        (client.replyString?.trim()?.takeIf { it.isNotEmpty() }?.let { ": $it" } ?: ".")
+                )
+            }
 
             val md5Hex = digest.digest().joinToString("") { String.format("%02x", it) }
             onChunkComplete(index, md5Hex)
@@ -209,7 +262,7 @@ class ChunkTransferEngine(
             client.setFileType(org.apache.commons.net.ftp.FTP.BINARY_FILE_TYPE)
             if (range.first > 0L) client.restartOffset = range.first
 
-            val length = range.last - range.first
+            val length = range.byteCount
             val digest = MessageDigest.getInstance("MD5")
             val chunkStart = System.currentTimeMillis()
 
@@ -218,7 +271,12 @@ class ChunkTransferEngine(
             else
                 client.appendFileStream(remotePath)
 
-            storeStream?.use { out ->
+            if (storeStream == null) {
+                throw FtpClientException(
+                    "Server refused the upload of $remotePath: ${client.replyString?.trim().orEmpty()}"
+                )
+            }
+            storeStream.use { out ->
                 RandomAccessFile(localFile, "r").use { raf ->
                     val channel: FileChannel = raf.channel
                     channel.position(range.first)
@@ -254,7 +312,14 @@ class ChunkTransferEngine(
                     out.flush()
                 }
             }
-            client.completePendingCommand()
+            if (!client.completePendingCommand()) {
+                throw FtpClientException(
+                    "Server didn't accept the upload of $remotePath: ${client.replyString?.trim().orEmpty()}"
+                )
+            }
+            if (transferred < length) {
+                throw FtpClientException("Upload of $remotePath stopped after $transferred of $length bytes.")
+            }
 
             val md5Hex = digest.digest().joinToString("") { String.format("%02x", it) }
             onChunkComplete(index, md5Hex)
