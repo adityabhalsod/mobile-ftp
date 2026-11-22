@@ -5,7 +5,13 @@ import android.util.Log
 import com.mobileftp.domain.model.ServerConfig
 import com.mobileftp.util.StorageUtils
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,6 +22,7 @@ import org.apache.ftpserver.DataConnectionConfigurationFactory
 import org.apache.ftpserver.FtpServer
 import org.apache.ftpserver.FtpServerFactory
 import org.apache.ftpserver.ftplet.Authority
+import org.apache.ftpserver.ftplet.Ftplet
 import org.apache.ftpserver.ftplet.FtpException
 import org.apache.ftpserver.listener.ListenerFactory
 import org.apache.ftpserver.usermanager.PropertiesUserManagerFactory
@@ -33,7 +40,12 @@ data class ConnectedClient(
     val sessionId: String,
     val ip: String,
     val username: String,
-    val connectedAt: Long
+    val connectedAt: Long,
+    /** Latest FTP command from this client, e.g. "LIST" or "RETR movie.mp4". */
+    val lastCommand: String? = null,
+    val lastActivityAt: Long = connectedAt,
+    /** Upload or download running on this session right now, if any. */
+    val currentTransfer: ServerTransfer? = null
 )
 
 @Singleton
@@ -62,6 +74,14 @@ class FtpServerRepository @Inject constructor(
 
     private val _connectedClients = MutableStateFlow<List<ConnectedClient>>(emptyList())
     val connectedClients: StateFlow<List<ConnectedClient>> = _connectedClients.asStateFlow()
+
+    private val _transfers = MutableStateFlow<List<ServerTransfer>>(emptyList())
+    /** Active server-side transfers first, then the most recent finished ones. */
+    val transfers: StateFlow<List<ServerTransfer>> = _transfers.asStateFlow()
+
+    private val activity = ServerActivityTracker()
+    private val publishScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var publishJob: Job? = null
 
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
@@ -120,16 +140,15 @@ class FtpServerRepository @Inject constructor(
             }
             serverFactory.userManager = userManager
 
-            // Stats ftplet to count bytes through STOR/RETR
-            val statsFtplet = ServerStatsFtplet(
-                onBytes = { delta -> _bytesTransferred.value = _bytesTransferred.value + delta },
-                onClientsChanged = { clients -> _connectedClients.value = clients }
-            )
-            serverFactory.ftplets = mapOf("stats" to statsFtplet)
+            // Client activity: the ftplet sees connections, commands and transfer
+            // start/end; the file system wrapper counts bytes while they flow.
+            serverFactory.ftplets = mutableMapOf<String, Ftplet>("stats" to ServerStatsFtplet(activity))
+            serverFactory.fileSystem = TrackingFileSystemFactory(activity)
 
             val server = serverFactory.createServer()
             server.start()
             ftpServer = server
+            startPublishing()
             _status.value = ServerStatus.RUNNING
             _lastError.value = null
         }.onFailure {
@@ -159,12 +178,39 @@ class FtpServerRepository @Inject constructor(
             runCatching { it.stop() }
         }
         ftpServer = null
+        publishJob?.cancel()
+        publishJob = null
+        activity.clearSessions()
+        publish()
         _status.value = ServerStatus.STOPPED
-        _connectedClients.value = emptyList()
     }
 
     fun resetCounters() {
-        _bytesTransferred.value = 0L
+        activity.resetCounters()
+        publish()
+    }
+
+    /**
+     * Pushes the tracker's state to the flows a few times a second. Bytes arrive
+     * per network chunk, far too often to emit each one to the UI.
+     */
+    private fun startPublishing() {
+        publishJob?.cancel()
+        publishJob = publishScope.launch {
+            while (isActive) {
+                publish()
+                delay(PUBLISH_INTERVAL_MS)
+            }
+        }
+    }
+
+    // Synchronized so a tick that raced with stop() can't overwrite the cleared state.
+    @Synchronized
+    private fun publish() {
+        val snap = activity.snapshot()
+        _connectedClients.value = snap.clients
+        _transfers.value = snap.transfers
+        _bytesTransferred.value = snap.totalBytes
     }
 
     private fun resolveRoot(config: ServerConfig): File {
@@ -183,5 +229,6 @@ class FtpServerRepository @Inject constructor(
 
     companion object {
         private const val TAG: String = "FtpServerRepository"
+        private const val PUBLISH_INTERVAL_MS: Long = 250L
     }
 }

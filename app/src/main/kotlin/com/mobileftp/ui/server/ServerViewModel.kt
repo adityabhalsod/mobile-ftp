@@ -7,6 +7,7 @@ import com.mobileftp.data.local.SettingsStore
 import com.mobileftp.data.repository.ConnectedClient
 import com.mobileftp.data.repository.FtpServerRepository
 import com.mobileftp.data.repository.ServerStatus
+import com.mobileftp.data.repository.ServerTransfer
 import com.mobileftp.domain.model.NetworkInterfaceInfo
 import com.mobileftp.domain.model.ServerConfig
 import com.mobileftp.network.NetworkInterfaceSelector
@@ -41,6 +42,8 @@ data class ServerScreenState(
     val selectedInterface: NetworkInterfaceInfo? = null,
     val clients: List<ConnectedClient> = emptyList(),
     val bytesTransferred: Long = 0L,
+    /** Uploads/downloads made by clients connected to this server (active first). */
+    val transfers: List<ServerTransfer> = emptyList(),
     val throughput: com.mobileftp.domain.model.ThroughputSnapshot =
         com.mobileftp.domain.model.ThroughputSnapshot(0L, 0L, 0L, emptyList(), 0L),
     val error: String? = null,
@@ -110,13 +113,22 @@ class ServerViewModel @Inject constructor(
             )
         }.launchIn(viewModelScope)
 
+        var lastTotal: Long? = null
         serverRepository.bytesTransferred.onEach { total ->
-            // On every byte tick, feed the throughput monitor with the delta.
-            // bytesTransferred is owned by this collector only, so the delta is exact.
-            val previous = _state.value.bytesTransferred
-            val delta = (total - previous).coerceAtLeast(0L)
-            if (delta > 0L) throughputMonitor.report(delta)
+            // Feed the throughput monitor with the delta since the last tick. The
+            // first value is only a baseline: bytes moved before this screen opened
+            // must not show up as one huge spike.
+            val previous = lastTotal
+            lastTotal = total
+            if (previous != null) {
+                val delta = (total - previous).coerceAtLeast(0L)
+                if (delta > 0L) throughputMonitor.report(delta)
+            }
             _state.value = _state.value.copy(bytesTransferred = total)
+        }.launchIn(viewModelScope)
+
+        serverRepository.transfers.onEach { transfers ->
+            _state.value = _state.value.copy(transfers = transfers)
         }.launchIn(viewModelScope)
 
         throughputMonitor.snapshot.onEach { snap ->
