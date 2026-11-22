@@ -144,6 +144,13 @@ class FtpTransferWorker @AssistedInject constructor(
             checkpointJob.cancel()
             transferRepository.setProgress(jobId, totalTransferred)
             transferRepository.setJobState(jobId, TransferState.COMPLETED)
+            if (job.direction == TransferDirection.DOWNLOAD) {
+                // Files written straight to Download/ aren't indexed until scanned, so
+                // file managers (e.g. on Meta Quest) didn't show finished downloads.
+                runCatching {
+                    android.media.MediaScannerConnection.scanFile(context, arrayOf(job.localPath), null, null)
+                }
+            }
             return Result.success(workDataOf(KEY_BYTES to totalTransferred))
         } catch (c: kotlinx.coroutines.CancellationException) {
             // Cancelled from the Transfers screen (which already set CANCELLED) or stopped by
