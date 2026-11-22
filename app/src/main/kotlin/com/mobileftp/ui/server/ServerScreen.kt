@@ -50,6 +50,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.mobileftp.data.repository.ServerStatus
+import com.mobileftp.data.repository.ServerTransfer
+import com.mobileftp.data.repository.ServerTransferDirection
+import com.mobileftp.data.repository.ServerTransferStatus
 import com.mobileftp.ui.components.NetworkBadge
 import com.mobileftp.ui.components.QrCodeCard
 import com.mobileftp.ui.components.RaycastButton
@@ -164,6 +167,8 @@ fun ServerScreen(
         item { ConnectionsCard(state) }
 
         item { ThroughputCard(state) }
+
+        item { ServerTransfersCard(state) }
 
         item {
             ConfigSection(
@@ -388,22 +393,97 @@ private fun ConnectionsCard(state: ServerScreenState) {
                 Text("No connected clients", style = RaycastType.BodySmall.copy(color = colors.TextTertiary))
             } else {
                 state.clients.forEach { client ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(client.ip, style = RaycastType.LabelMono.copy(color = colors.TextPrimary))
-                        Text(client.username, style = RaycastType.MetaMono.copy(color = colors.TextSecondary))
+                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(client.ip, style = RaycastType.LabelMono.copy(color = colors.TextPrimary))
+                            Text(client.username, style = RaycastType.MetaMono.copy(color = colors.TextSecondary))
+                            Text(
+                                HumanReadableUtils.relative(client.connectedAt),
+                                style = RaycastType.MetaMono.copy(color = colors.TextTertiary)
+                            )
+                        }
+                        // What the client is doing: a live transfer, else its last command.
+                        val transfer = client.currentTransfer
+                        val activity = when {
+                            transfer != null -> "${directionArrow(transfer.direction)} ${transfer.fileName} · " +
+                                "${HumanReadableUtils.bytes(transfer.bytes)} · " +
+                                HumanReadableUtils.bytesPerSecond(transfer.averageBps())
+                            client.lastCommand != null ->
+                                "${client.lastCommand} · ${HumanReadableUtils.relative(client.lastActivityAt)}"
+                            else -> "Connected, waiting for commands"
+                        }
                         Text(
-                            HumanReadableUtils.relative(client.connectedAt),
-                            style = RaycastType.MetaMono.copy(color = colors.TextTertiary)
+                            activity,
+                            maxLines = 1,
+                            style = RaycastType.MetaMono.copy(
+                                color = if (transfer != null) colors.AccentBlue else colors.TextTertiary
+                            )
                         )
                     }
                 }
             }
         }
+    }
+}
+
+private fun directionArrow(direction: ServerTransferDirection): String =
+    if (direction == ServerTransferDirection.UPLOAD) "↑" else "↓"
+
+/** Transfers made by clients connected to this server: live ones first, then recent history. */
+@Composable
+private fun ServerTransfersCard(state: ServerScreenState) {
+    val colors = LocalRaycastColors.current
+    RaycastCard(modifier = Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(RaycastSpacing.sm)) {
+            Text("TRANSFERS", style = RaycastType.LabelMono.copy(color = colors.TextSecondary))
+            if (state.transfers.isEmpty()) {
+                Text(
+                    "No uploads or downloads from connected clients yet",
+                    style = RaycastType.BodySmall.copy(color = colors.TextTertiary)
+                )
+            } else {
+                Text(
+                    "Total ${HumanReadableUtils.bytes(state.bytesTransferred)}",
+                    style = RaycastType.MetaMono.copy(color = colors.TextTertiary)
+                )
+                state.transfers.forEach { ServerTransferRow(it) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServerTransferRow(transfer: ServerTransfer) {
+    val colors = LocalRaycastColors.current
+    val (label, tint) = when (transfer.status) {
+        ServerTransferStatus.ACTIVE -> HumanReadableUtils.bytesPerSecond(transfer.averageBps()) to colors.AccentBlue
+        ServerTransferStatus.COMPLETED -> "Done" to colors.AccentGreen
+        ServerTransferStatus.FAILED -> "Failed" to colors.AccentStart
+    }
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${directionArrow(transfer.direction)} ${transfer.fileName}",
+                maxLines = 1,
+                style = RaycastType.LabelMono.copy(color = colors.TextPrimary),
+                modifier = Modifier.weight(1f)
+            )
+            Text(label, style = RaycastType.MetaMono.copy(color = tint))
+        }
+        val details = buildList {
+            add(transfer.clientIp)
+            add(HumanReadableUtils.bytes(transfer.bytes))
+            if (transfer.status != ServerTransferStatus.ACTIVE) {
+                add(HumanReadableUtils.bytesPerSecond(transfer.averageBps()))
+                add(HumanReadableUtils.relative(transfer.finishedAt ?: transfer.startedAt))
+            }
+            transfer.error?.let { add(it) }
+        }.joinToString(" · ")
+        Text(details, maxLines = 2, style = RaycastType.MetaMono.copy(color = colors.TextTertiary))
     }
 }
 

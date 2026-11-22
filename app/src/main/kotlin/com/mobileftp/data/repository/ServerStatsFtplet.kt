@@ -1,68 +1,67 @@
 package com.mobileftp.data.repository
 
 import org.apache.ftpserver.ftplet.DefaultFtplet
+import org.apache.ftpserver.ftplet.FtpReply
 import org.apache.ftpserver.ftplet.FtpRequest
 import org.apache.ftpserver.ftplet.FtpSession
 import org.apache.ftpserver.ftplet.FtpletResult
-import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Tracks connected clients and bytes transferred through the embedded server.
+ * Feeds [ServerActivityTracker] with connections, commands and transfer
+ * start/end events from the embedded server. Bytes are counted live by
+ * [TrackingFileSystemFactory].
  */
 class ServerStatsFtplet(
-    private val onBytes: (Long) -> Unit,
-    private val onClientsChanged: (List<ConnectedClient>) -> Unit
+    private val tracker: ServerActivityTracker
 ) : DefaultFtplet() {
 
-    private val sessions: MutableMap<String, ConnectedClient> = ConcurrentHashMap()
+    private val FtpSession.key: String get() = sessionId.toString()
 
     override fun onConnect(session: FtpSession): FtpletResult {
-        val client = ConnectedClient(
-            sessionId = session.sessionId.toString(),
-            ip = session.clientAddress?.address?.hostAddress ?: "?",
-            username = session.user?.name ?: "anonymous",
-            connectedAt = System.currentTimeMillis()
-        )
-        sessions[client.sessionId] = client
-        onClientsChanged(sessions.values.toList())
+        tracker.onConnect(session.key, session.clientAddress?.address?.hostAddress ?: "?")
         return FtpletResult.DEFAULT
     }
 
     override fun onDisconnect(session: FtpSession): FtpletResult {
-        sessions.remove(session.sessionId.toString())
-        onClientsChanged(sessions.values.toList())
+        tracker.onDisconnect(session.key)
         return FtpletResult.DEFAULT
     }
 
-    override fun onLogin(session: FtpSession, request: FtpRequest): FtpletResult {
-        val sessionId = session.sessionId.toString()
-        sessions[sessionId]?.let {
-            sessions[sessionId] = it.copy(username = session.user?.name ?: it.username)
-            onClientsChanged(sessions.values.toList())
+    // DefaultFtplet returns null for commands it has no hook for, so these
+    // overrides must keep the nullable Java return type.
+    override fun beforeCommand(session: FtpSession, request: FtpRequest): FtpletResult? {
+        tracker.onCommand(session.key, request.command ?: "?", request.argument)
+        val direction = when (request.command?.uppercase()) {
+            "STOR", "APPE", "STOU" -> ServerTransferDirection.UPLOAD
+            "RETR" -> ServerTransferDirection.DOWNLOAD
+            else -> null
         }
+        if (direction != null) {
+            bindView(session)
+            tracker.transferStarted(session.key, displayName(request.argument), direction)
+        }
+        return super.beforeCommand(session, request)
+    }
+
+    override fun afterCommand(session: FtpSession, request: FtpRequest, reply: FtpReply?): FtpletResult? {
+        when (request.command?.uppercase()) {
+            "STOR", "APPE", "STOU", "RETR" ->
+                tracker.transferFinished(session.key, reply?.code ?: 0, reply?.message)
+        }
+        return super.afterCommand(session, request, reply)
+    }
+
+    override fun onLogin(session: FtpSession, request: FtpRequest): FtpletResult? {
+        bindView(session)
+        tracker.onLogin(session.key, session.user?.name)
         return FtpletResult.DEFAULT
     }
 
-    override fun onUploadEnd(session: FtpSession, request: FtpRequest): FtpletResult {
-        reportFromArgument(session, request)
-        return FtpletResult.DEFAULT
+    /** Lets the session's file system view attribute streamed bytes to this session. */
+    private fun bindView(session: FtpSession) {
+        (session.fileSystemView as? TrackingFileSystemView)?.sessionId = session.key
     }
 
-    override fun onDownloadEnd(session: FtpSession, request: FtpRequest): FtpletResult {
-        reportFromArgument(session, request)
-        return FtpletResult.DEFAULT
-    }
-
-    /**
-     * Best-effort byte tally — resolves the file from the FTP request argument and
-     * reports its current size on transfer completion.
-     */
-    private fun reportFromArgument(session: FtpSession, request: FtpRequest) {
-        val home = session.user?.homeDirectory ?: return
-        val arg = request.argument ?: return
-        val target = if (arg.startsWith("/")) File(home, arg.removePrefix("/"))
-        else File(File(home, session.fileSystemView?.workingDirectory?.absolutePath ?: ""), arg)
-        if (target.exists()) onBytes(target.length())
-    }
+    private fun displayName(argument: String?): String =
+        argument?.trimEnd('/')?.substringAfterLast('/')?.ifBlank { null } ?: argument ?: "(unnamed)"
 }
