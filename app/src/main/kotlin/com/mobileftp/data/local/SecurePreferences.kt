@@ -31,6 +31,10 @@ class SecurePreferences(context: Context) {
         prefs.edit().putString(key, value).apply()
     }
 
+    /** Synchronous write — returns once the value is persisted. Call off the main thread. */
+    fun putStringNow(key: String, value: String): Boolean =
+        prefs.edit().putString(key, value).commit()
+
     fun getInt(key: String, default: Int): Int = prefs.getInt(key, default)
     fun putInt(key: String, value: Int) { prefs.edit().putInt(key, value).apply() }
 

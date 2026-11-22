@@ -77,7 +77,7 @@ class FtpServerService : Service() {
             result.onSuccess {
                 Log.i(TAG, "FTP server started on port ${config.port}")
             }.onFailure { err ->
-                val message = err.message ?: err.javaClass.simpleName
+                val message = serverRepository.lastError.value ?: err.message ?: err.javaClass.simpleName
                 Log.e(TAG, "FTP server failed to start: $message", err)
                 updateNotification("Start failed: $message")
                 Toast.makeText(this@FtpServerService, "FTP start failed: $message", Toast.LENGTH_LONG).show()

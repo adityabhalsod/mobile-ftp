@@ -8,7 +8,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -49,6 +55,7 @@ enum class Tab(val title: String, val icon: ImageVector) {
     CLIENT("Client", Icons.Filled.Cloud)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MobileFtpApp(
     themePreference: ThemePreference,
@@ -63,7 +70,17 @@ fun MobileFtpApp(
         modifier = Modifier.fillMaxSize(),
         color = colors.Surface
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        // The activity is edge-to-edge (setDecorFitsSystemWindows(false)) but no insets
+        // were applied: content sat under the status bar, the bottom nav under the
+        // gesture bar, and the keyboard covered the config fields so they couldn't be
+        // reached or edited. Pad for system bars + IME here, once, for every tab.
+        val imeVisible = WindowInsets.isImeVisible
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .imePadding()
+        ) {
             Box(modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -94,10 +111,13 @@ fun MobileFtpApp(
                     }
                 }
             }
-            BottomNav(
-                current = currentTab,
-                onSelect = { currentTab = it }
-            )
+            // Hide the tab bar while typing so the focused field gets the space.
+            if (!imeVisible) {
+                BottomNav(
+                    current = currentTab,
+                    onSelect = { currentTab = it }
+                )
+            }
         }
     }
 }
@@ -119,6 +139,7 @@ private fun BottomNav(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(colors.Surface)
+                .navigationBarsPadding()
                 .padding(vertical = 4.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically

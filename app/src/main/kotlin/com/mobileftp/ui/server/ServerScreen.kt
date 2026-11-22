@@ -10,6 +10,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -44,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -65,6 +67,7 @@ import com.mobileftp.ui.theme.RaycastSpacing
 import com.mobileftp.ui.theme.RaycastType
 import com.mobileftp.ui.theme.ThemePreference
 import com.mobileftp.util.HumanReadableUtils
+import com.mobileftp.util.ConfigValidators
 import com.mobileftp.util.StorageUtils
 
 @Composable
@@ -110,6 +113,14 @@ fun ServerScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // One-shot messages from the ViewModel (save result, validation, …).
+    androidx.compose.runtime.LaunchedEffect(state.message) {
+        state.message?.let {
+            android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_LONG).show()
+            viewModel.consumeMessage()
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -137,6 +148,17 @@ fun ServerScreen(
                 qrExpanded = qrExpanded,
                 onToggleQr = { qrExpanded = !qrExpanded }
             )
+        }
+
+        state.error?.let { err ->
+            item {
+                RaycastCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    background = colors.AccentStart.copy(alpha = 0.10f)
+                ) {
+                    Text(err, style = RaycastType.BodySmall.copy(color = colors.AccentStart))
+                }
+            }
         }
 
         item { ConnectionsCard(state) }
@@ -220,10 +242,12 @@ private fun StatusHeroCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 StatusPill(state = statusPillState, label = statusLabel)
+                val busy = state.lifecyclePending || state.status == ServerStatus.STARTING
                 if (running) {
                     RaycastButton(
-                        text = "Stop",
+                        text = if (busy) "Stopping…" else "Stop",
                         onClick = onStop,
+                        enabled = !busy,
                         style = RaycastButtonStyle.Destructive,
                         leading = {
                             Icon(
@@ -235,8 +259,9 @@ private fun StatusHeroCard(
                     )
                 } else {
                     RaycastButton(
-                        text = "Start",
+                        text = if (busy) "Starting…" else "Start",
                         onClick = onStart,
+                        enabled = !busy,
                         style = RaycastButtonStyle.Primary,
                         leading = {
                             Icon(
@@ -259,10 +284,11 @@ private fun StatusHeroCard(
                     Icon(
                         imageVector = Icons.Filled.Refresh,
                         contentDescription = "Refresh LAN IP",
-                        tint = colors.TextTertiary,
+                        tint = if (state.refreshingLan) colors.TextTertiary.copy(alpha = 0.4f) else colors.TextTertiary,
                         modifier = Modifier
+                            .clickable(enabled = !state.refreshingLan, onClick = onRefreshLan)
+                            .padding(4.dp)
                             .size(16.dp)
-                            .clickable(onClick = onRefreshLan)
                     )
                 }
             }
@@ -270,16 +296,17 @@ private fun StatusHeroCard(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("PUBLIC", style = RaycastType.LabelMono.copy(color = colors.TextSecondary))
                 Text(
-                    state.publicIp ?: "—",
+                    if (state.refreshingPublic) "…" else state.publicIp ?: "—",
                     style = RaycastType.BodySmall.copy(color = colors.TextSecondary)
                 )
                 Icon(
                     imageVector = Icons.Filled.Refresh,
                     contentDescription = "Refresh public IP",
-                    tint = colors.TextTertiary,
+                    tint = if (state.refreshingPublic) colors.TextTertiary.copy(alpha = 0.4f) else colors.TextTertiary,
                     modifier = Modifier
+                        .clickable(enabled = !state.refreshingPublic, onClick = onRefreshPublic)
+                        .padding(4.dp)
                         .size(14.dp)
-                        .clickable(onClick = onRefreshPublic)
                 )
             }
 
@@ -303,7 +330,10 @@ private fun StatusHeroCard(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 state.interfaces.take(3).forEach { NetworkBadge(info = it) }
             }
 
@@ -408,17 +438,56 @@ private fun ConfigSection(
 ) {
     val colors = LocalRaycastColors.current
     val context = LocalContext.current
-    var port by remember(state.config.port) { mutableStateOf(state.config.port.toString()) }
-    var username by remember(state.config.username) { mutableStateOf(state.config.username) }
-    var password by remember(state.config.password) { mutableStateOf(state.config.password) }
-    var rootPath by remember(state.config.rootDirectoryPath) { mutableStateOf(state.config.rootDirectoryPath) }
-    var rootUri by remember(state.config.rootDirectoryUri) { mutableStateOf(state.config.rootDirectoryUri) }
-    var maxConn by remember(state.config.maxConnections) { mutableStateOf(state.config.maxConnections.toFloat()) }
-    var chunkCount by remember(state.config.chunkCount) { mutableStateOf(state.config.chunkCount.toFloat()) }
-    var ftps by remember(state.config.ftpsEnabled) { mutableStateOf(state.config.ftpsEnabled) }
-    var anon by remember(state.config.anonymousAccess) { mutableStateOf(state.config.anonymousAccess) }
-    var pasvStart by remember(state.config.pasvPortStart) { mutableStateOf(state.config.pasvPortStart.toString()) }
-    var pasvEnd by remember(state.config.pasvPortEnd) { mutableStateOf(state.config.pasvPortEnd.toString()) }
+    // The form edits the *persisted* config. It used to be keyed per-field on the
+    // config currently shown, which is the *running* config while the server is up:
+    // after Save the fields snapped back to the old running values and every
+    // upstream emission wiped what the user was typing.
+    val saved = state.savedConfig
+    var port by remember(saved) { mutableStateOf(saved.port.toString()) }
+    var username by remember(saved) { mutableStateOf(saved.username) }
+    var password by remember(saved) { mutableStateOf(saved.password) }
+    var rootPath by remember(saved) { mutableStateOf(saved.rootDirectoryPath) }
+    var rootUri by remember(saved) { mutableStateOf(saved.rootDirectoryUri) }
+    var maxConn by remember(saved) { mutableStateOf(saved.maxConnections.coerceIn(1, 32).toFloat()) }
+    var chunkCount by remember(saved) { mutableStateOf(saved.chunkCount.coerceIn(2, 32).toFloat()) }
+    var anon by remember(saved) { mutableStateOf(saved.anonymousAccess) }
+    var pasvStart by remember(saved) { mutableStateOf(saved.pasvPortStart.toString()) }
+    var pasvEnd by remember(saved) { mutableStateOf(saved.pasvPortEnd.toString()) }
+    var showErrors by remember(saved) { mutableStateOf(false) }
+
+    // Inline validation for every field.
+    val portError = ConfigValidators.validatePort(port, ConfigValidators.MIN_UNPRIVILEGED_PORT)
+    val usernameError = ConfigValidators.validateServerUsername(username)
+    val passwordError = ConfigValidators.validateServerPassword(password)
+    val (pasvStartError, pasvEndError) =
+        ConfigValidators.validatePasvRange(pasvStart, pasvEnd, port.toIntOrNull())
+    val hasErrors = listOf(portError, usernameError, passwordError, pasvStartError, pasvEndError)
+        .any { it != null }
+
+    // Show an error once the field differs from what is saved, or after a Save attempt.
+    fun shown(error: String?, value: String, original: String): String? =
+        if (showErrors || value != original) error else null
+
+    val draft = saved.copy(
+        port = port.toIntOrNull() ?: saved.port,
+        username = username.trim(),
+        password = password,
+        rootDirectoryUri = rootUri,
+        rootDirectoryPath = rootPath,
+        pasvPortStart = pasvStart.toIntOrNull() ?: saved.pasvPortStart,
+        pasvPortEnd = pasvEnd.toIntOrNull() ?: saved.pasvPortEnd,
+        maxConnections = maxConn.toInt(),
+        chunkCount = chunkCount.toInt(),
+        // Server-side FTPS is not implemented yet (needs a TLS keystore); never persist it on.
+        ftpsEnabled = false,
+        anonymousAccess = anon
+    )
+    val dirty = draft != saved.copy(ftpsEnabled = false)
+    // The PASV range depends on three fields, so surface its errors when any of them changed.
+    val showPasvErrors = showErrors ||
+        port != saved.port.toString() ||
+        pasvStart != saved.pasvPortStart.toString() ||
+        pasvEnd != saved.pasvPortEnd.toString()
 
     // SAF directory picker — gives us a content tree URI we translate to a real path.
     val pickDirectory = rememberLauncherForActivityResult(
@@ -464,13 +533,22 @@ private fun ConfigSection(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text("CONFIGURATION", style = RaycastType.LabelMono.copy(color = colors.TextSecondary))
-                    Text("Port, credentials, advanced", style = RaycastType.BodySmall.copy(color = colors.TextTertiary))
+                    Text(
+                        when {
+                            dirty -> "Unsaved changes"
+                            state.restartRequired -> "Saved — restart the server to apply"
+                            else -> "Port, credentials, advanced"
+                        },
+                        style = RaycastType.BodySmall.copy(
+                            color = if (dirty || state.restartRequired) colors.AccentAmber else colors.TextTertiary
+                        )
+                    )
                 }
                 Icon(
                     imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = null,
+                    contentDescription = if (expanded) "Collapse configuration" else "Expand configuration",
                     tint = colors.TextSecondary
                 )
             }
@@ -486,24 +564,31 @@ private fun ConfigSection(
                     SettingGroupHeader("AUTHENTICATION")
                     RaycastInput(
                         value = username,
-                        onValueChange = { username = it },
+                        onValueChange = { username = it.take(ConfigValidators.MAX_USERNAME) },
                         label = "Username",
+                        imeAction = ImeAction.Next,
+                        error = shown(usernameError, username, saved.username),
                         modifier = Modifier.fillMaxWidth()
                     )
                     RaycastInput(
                         value = password,
-                        onValueChange = { password = it },
+                        onValueChange = { password = it.take(ConfigValidators.MAX_PASSWORD) },
                         label = "Password",
                         isPassword = true,
+                        imeAction = ImeAction.Next,
+                        error = shown(passwordError, password, saved.password),
                         modifier = Modifier.fillMaxWidth()
                     )
 
                     SettingGroupHeader("NETWORK")
                     RaycastInput(
                         value = port,
-                        onValueChange = { port = it.filter { c -> c.isDigit() } },
+                        onValueChange = { port = it.filter { c -> c.isDigit() }.take(5) },
                         label = "Port",
+                        placeholder = "2121",
                         keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Next,
+                        error = shown(portError, port, saved.port.toString()),
                         modifier = Modifier.fillMaxWidth()
                     )
                     Row(
@@ -512,22 +597,30 @@ private fun ConfigSection(
                     ) {
                         RaycastInput(
                             value = pasvStart,
-                            onValueChange = { pasvStart = it.filter { c -> c.isDigit() } },
+                            onValueChange = { pasvStart = it.filter { c -> c.isDigit() }.take(5) },
                             label = "PASV Start",
                             keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Next,
+                            error = if (showPasvErrors) pasvStartError else null,
                             modifier = Modifier.weight(1f)
                         )
                         RaycastInput(
                             value = pasvEnd,
-                            onValueChange = { pasvEnd = it.filter { c -> c.isDigit() } },
+                            onValueChange = { pasvEnd = it.filter { c -> c.isDigit() }.take(5) },
                             label = "PASV End",
                             keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done,
+                            error = if (showPasvErrors) pasvEndError else null,
                             modifier = Modifier.weight(1f)
                         )
                     }
-                    SettingRow(label = "FTPS (TLS)", description = "Encrypt control & data channels", trailing = {
-                        RaycastSwitch(checked = ftps, onCheckedChange = { ftps = it })
-                    })
+                    SettingRow(
+                        label = "FTPS (TLS)",
+                        description = "Not available for the built-in server yet",
+                        trailing = {
+                            RaycastSwitch(checked = false, onCheckedChange = {}, enabled = false)
+                        }
+                    )
                     SettingRow(label = "Anonymous access", description = "Allow login without password (off by default)", trailing = {
                         RaycastSwitch(checked = anon, onCheckedChange = { anon = it })
                     })
@@ -595,36 +688,48 @@ private fun ConfigSection(
                         )
                     )
 
-                    RaycastButton(
-                        text = "Save Configuration",
-                        onClick = {
-                            val newConfig = state.config.copy(
-                                port = port.toIntOrNull() ?: state.config.port,
-                                username = username,
-                                password = password,
-                                rootDirectoryUri = rootUri,
-                                rootDirectoryPath = rootPath,
-                                pasvPortStart = pasvStart.toIntOrNull() ?: state.config.pasvPortStart,
-                                pasvPortEnd = pasvEnd.toIntOrNull() ?: state.config.pasvPortEnd,
-                                maxConnections = maxConn.toInt(),
-                                chunkCount = chunkCount.toInt(),
-                                ftpsEnabled = ftps,
-                                anonymousAccess = anon
-                            )
-                            onSave(newConfig)
-                            val msg = if (state.status == ServerStatus.RUNNING)
-                                "Configuration saved. Restart the server to apply."
-                            else
-                                "Configuration saved."
-                            android.widget.Toast.makeText(
-                                context,
-                                msg,
-                                android.widget.Toast.LENGTH_LONG
-                            ).show()
-                        },
-                        style = RaycastButtonStyle.Primary,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(RaycastSpacing.md)
+                    ) {
+                        RaycastButton(
+                            text = "Reset",
+                            onClick = {
+                                port = saved.port.toString()
+                                username = saved.username
+                                password = saved.password
+                                rootPath = saved.rootDirectoryPath
+                                rootUri = saved.rootDirectoryUri
+                                maxConn = saved.maxConnections.coerceIn(1, 32).toFloat()
+                                chunkCount = saved.chunkCount.coerceIn(2, 32).toFloat()
+                                anon = saved.anonymousAccess
+                                pasvStart = saved.pasvPortStart.toString()
+                                pasvEnd = saved.pasvPortEnd.toString()
+                                showErrors = false
+                            },
+                            style = RaycastButtonStyle.Secondary,
+                            enabled = dirty && !state.saving,
+                            modifier = Modifier.weight(1f)
+                        )
+                        RaycastButton(
+                            text = if (state.saving) "Saving…" else "Save",
+                            onClick = {
+                                if (hasErrors) {
+                                    showErrors = true
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "Please fix the highlighted fields.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    onSave(draft)
+                                }
+                            },
+                            style = RaycastButtonStyle.Primary,
+                            enabled = dirty && !state.saving,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }

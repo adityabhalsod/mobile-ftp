@@ -4,7 +4,9 @@ import com.mobileftp.domain.model.ConnectionProfile
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.apache.commons.net.ftp.FTP
+import com.mobileftp.util.FtpClientException
 import org.apache.commons.net.ftp.FTPClient
+import org.apache.commons.net.ftp.FTPReply
 import org.apache.commons.net.ftp.FTPSClient
 
 /**
@@ -38,24 +40,33 @@ class FtpConnectionPool(
         }
     }
 
-    /** Borrow a connected, logged-in FTP client. Creates one if pool is empty and below cap. */
+    /**
+     * Borrow a connected, logged-in FTP client. Creates one if the pool is empty
+     * and below cap; otherwise waits for a client to be released (bounded).
+     */
     suspend fun borrow(): FTPClient {
-        mutex.withLock {
-            if (closed) error("Connection pool is closed")
-            available.removeFirstOrNull()?.let { client ->
-                if (client.isConnected && client.sendNoOp()) return client
-                runCatching { client.disconnect() }
-                allClients.remove(client)
+        val deadline = System.currentTimeMillis() + BORROW_TIMEOUT_MS
+        while (true) {
+            mutex.withLock {
+                if (closed) throw FtpClientException("Not connected")
+                while (true) {
+                    val client = available.removeFirstOrNull() ?: break
+                    if (client.isConnected && runCatching { client.sendNoOp() }.getOrDefault(false)) return client
+                    runCatching { client.disconnect() }
+                    allClients.remove(client)
+                }
+                if (allClients.size < maxSize) {
+                    val c = createClient()
+                    allClients += c
+                    return c
+                }
             }
-            if (allClients.size < maxSize) {
-                val c = createClient()
-                allClients += c
-                return c
+            if (System.currentTimeMillis() > deadline) {
+                throw FtpClientException("All connections are busy. Try again in a moment.")
             }
+            // Pool exhausted — wait briefly and retry.
+            kotlinx.coroutines.delay(50L)
         }
-        // Pool exhausted — wait briefly and retry once.
-        kotlinx.coroutines.delay(50L)
-        return borrow()
     }
 
     /** Return a client to the pool. If broken, drop it. */
@@ -87,23 +98,50 @@ class FtpConnectionPool(
         }
     }
 
+    private companion object {
+        const val BORROW_TIMEOUT_MS: Long = 60_000L
+    }
+
     fun size(): Int = allClients.size
     fun availableCount(): Int = available.size
 
     private fun createClient(): FTPClient {
         val client: FTPClient = if (profile.ftps) FTPSClient("TLS", false) else FTPClient()
+        // UTF-8 control channel so non-ASCII file names list and transfer correctly.
+        client.controlEncoding = "UTF-8"
         SocketTuner.preConnect(client)
-        client.connect(profile.host, profile.port)
-        // Socket-level options can only be set once the socket actually exists.
-        SocketTuner.postConnect(client)
-        if (!client.login(profile.username, profile.password)) {
-            runCatching { client.disconnect() }
-            error("FTP login failed for ${profile.username}@${profile.host}")
+        try {
+            client.connect(profile.host, profile.port)
+            // Socket-level options can only be set once the socket actually exists.
+            SocketTuner.postConnect(client)
+            if (!FTPReply.isPositiveCompletion(client.replyCode)) {
+                throw FtpClientException(
+                    "Server refused the connection: ${client.replyString?.trim().orEmpty()}"
+                )
+            }
+            // Blank username used to be sent as-is and always failed — fall back to anonymous login.
+            val user = profile.username.trim().ifEmpty { "anonymous" }
+            val pass = if (profile.username.isBlank() && profile.password.isEmpty()) "anonymous@" else profile.password
+            if (!client.login(user, pass)) {
+                throw FtpClientException(
+                    "Login failed for $user@${profile.host}. Check the username and password."
+                )
+            }
+            if (client is FTPSClient) {
+                // Explicit FTPS: protect the data channel too. Without PBSZ/PROT P most
+                // servers reject LIST/RETR with "522 Data connections must be encrypted".
+                client.execPBSZ(0)
+                client.execPROT("P")
+            }
+            client.setFileType(FTP.BINARY_FILE_TYPE)
+            client.setFileTransferMode(FTP.STREAM_TRANSFER_MODE)
+            if (profile.passive) client.enterLocalPassiveMode() else client.enterLocalActiveMode()
+            client.bufferSize = AdaptiveBufferEngine.DEFAULT_BUFFER
+            return client
+        } catch (t: Throwable) {
+            // Never leak a half-open socket on failure.
+            runCatching { if (client.isConnected) client.disconnect() }
+            throw t
         }
-        client.setFileType(FTP.BINARY_FILE_TYPE)
-        client.setFileTransferMode(FTP.STREAM_TRANSFER_MODE)
-        if (profile.passive) client.enterLocalPassiveMode() else client.enterLocalActiveMode()
-        client.bufferSize = AdaptiveBufferEngine.DEFAULT_BUFFER
-        return client
     }
 }

@@ -5,17 +5,38 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.mobileftp.domain.model.ServerConfig
 import com.mobileftp.ui.theme.ThemePreference
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 private val Context.dataStore by preferencesDataStore(name = "mobile_ftp_settings")
 
 /** Application-wide non-sensitive settings (DataStore). Sensitive creds live in SecurePreferences. */
-class SettingsStore(private val context: Context) {
+class SettingsStore(
+    private val context: Context,
+    securePreferencesProvider: () -> SecurePreferences = { SecurePreferences(context) }
+) {
+
+    /**
+     * Encrypted prefs are expensive to open (Keystore + Tink). Previously a new
+     * instance was created on *every* DataStore emission, on the main thread,
+     * which made the Server screen stutter and freeze after a few saves.
+     * Open it once, lazily, and tolerate Keystore failures.
+     */
+    private val secure: SecurePreferences? by lazy {
+        runCatching(securePreferencesProvider)
+            .onFailure { Log.e(TAG, "Unable to open encrypted preferences", it) }
+            .getOrNull()
+    }
 
     private object Keys {
         val THEME = stringPreferencesKey("theme_preference")
@@ -31,6 +52,12 @@ class SettingsStore(private val context: Context) {
         val FTPS = booleanPreferencesKey("ftps_enabled")
         val COMPRESSION_ENABLED = booleanPreferencesKey("compression_enabled")
         val ADAPTIVE_BUFFER = booleanPreferencesKey("adaptive_buffer")
+        /**
+         * Bumped on every save. Credentials live in encrypted prefs, outside
+         * DataStore, so without this a save that only changed the username or
+         * password produced no DataStore emission and the UI kept stale values.
+         */
+        val CONFIG_REVISION = longPreferencesKey("server_config_revision")
     }
 
     val themeFlow: Flow<ThemePreference> = context.dataStore.data.map { prefs ->
@@ -42,14 +69,21 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { it[Keys.THEME] = value.name }
     }
 
-    val serverConfigFlow: Flow<ServerConfig> = context.dataStore.data.map(::mapServerConfig)
+    val serverConfigFlow: Flow<ServerConfig> = context.dataStore.data
+        .map(::mapServerConfig)
+        .distinctUntilChanged()
+        // Decrypting credentials touches disk + Keystore: keep it off the main thread.
+        .flowOn(Dispatchers.IO)
 
     private fun mapServerConfig(prefs: Preferences): ServerConfig {
-        val secure = SecurePreferences(context)
+        val defaults = ServerConfig()
+        val sp = secure
         return ServerConfig(
-            port = prefs[Keys.SERVER_PORT] ?: 2121,
-            username = secure.getString(SecurePreferences.KEY_SERVER_USERNAME, "mobile"),
-            password = secure.getString(SecurePreferences.KEY_SERVER_PASSWORD, "ftp"),
+            port = prefs[Keys.SERVER_PORT] ?: defaults.port,
+            username = runCatching { sp?.getString(SecurePreferences.KEY_SERVER_USERNAME, defaults.username) }
+                .getOrNull() ?: defaults.username,
+            password = runCatching { sp?.getString(SecurePreferences.KEY_SERVER_PASSWORD, defaults.password) }
+                .getOrNull() ?: defaults.password,
             rootDirectoryUri = prefs[Keys.SERVER_ROOT_URI].orEmpty(),
             rootDirectoryPath = prefs[Keys.SERVER_ROOT_PATH].orEmpty(),
             pasvPortStart = prefs[Keys.PASV_START] ?: 50000,
@@ -63,10 +97,14 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun saveServerConfig(config: ServerConfig) {
-        val secure = SecurePreferences(context)
-        secure.putString(SecurePreferences.KEY_SERVER_USERNAME, config.username)
-        secure.putString(SecurePreferences.KEY_SERVER_PASSWORD, config.password)
+        withContext(Dispatchers.IO) {
+            val sp = secure ?: error("Secure storage is unavailable on this device")
+            // commit() (not apply()) so the values are on disk before DataStore emits.
+            sp.putStringNow(SecurePreferences.KEY_SERVER_USERNAME, config.username)
+            sp.putStringNow(SecurePreferences.KEY_SERVER_PASSWORD, config.password)
+        }
         context.dataStore.edit { prefs ->
+            prefs[Keys.CONFIG_REVISION] = (prefs[Keys.CONFIG_REVISION] ?: 0L) + 1L
             prefs[Keys.SERVER_PORT] = config.port
             prefs[Keys.SERVER_ROOT_URI] = config.rootDirectoryUri
             prefs[Keys.SERVER_ROOT_PATH] = config.rootDirectoryPath
@@ -92,5 +130,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setAdaptiveBuffer(value: Boolean) {
         context.dataStore.edit { it[Keys.ADAPTIVE_BUFFER] = value }
+    }
+
+    private companion object {
+        const val TAG = "SettingsStore"
     }
 }

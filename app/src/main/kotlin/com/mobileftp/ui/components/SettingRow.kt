@@ -83,11 +83,12 @@ fun SettingGroupHeader(
 }
 
 @Composable
-fun RaycastSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+fun RaycastSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boolean = true) {
     val colors = LocalRaycastColors.current
     Switch(
         checked = checked,
         onCheckedChange = onCheckedChange,
+        enabled = enabled,
         colors = SwitchDefaults.colors(
             checkedThumbColor = colors.PrimaryButton,
             checkedTrackColor = colors.AccentBlue,
