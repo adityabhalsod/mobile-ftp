@@ -130,6 +130,12 @@ jobs:
           fi
           echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
 
+          # versionCode must only ever go up, or Android rejects the update as a
+          # downgrade ("App not installed"). Commits-since-last-tag resets after
+          # every tag, so use the total commit count instead.
+          VERSION_CODE=$(git rev-list HEAD --count)
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
           # Construct version string based on branch channel
           case "$BRANCH" in
             main)
@@ -168,7 +174,7 @@ jobs:
       # ── Inject versionCode into build ─────────────────────────────────
       - name: Update versionCode
         run: |
-          VERSION_CODE=${{ steps.version.outputs.build_number }}
+          VERSION_CODE=${{ steps.version.outputs.version_code }}
           echo "Setting versionCode=$VERSION_CODE"
           sed -i "s/versionCode = [0-9]*/versionCode = $VERSION_CODE/" app/build.gradle.kts
 
@@ -239,25 +245,18 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # ── Decode signing keystore from secrets ──────────────────────────
+      # Every release must be signed with the same key. Android refuses to
+      # update an installed app with an APK signed by a different key, and
+      # shows only "App not installed". A keystore generated inside this job
+      # would be a new random key on every run, so a missing secret is an error.
       - name: Decode keystore
         run: |
-          # If KEYSTORE_BASE64 secret is set, decode it to a file
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > ${{ github.workspace }}/release.keystore
-            echo "✅ Decoded release keystore from secrets"
-          else
-            # Generate a temporary keystore so the APK is always signed & installable
-            keytool -genkeypair -v \
-              -keystore ${{ github.workspace }}/release.keystore \
-              -alias release \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass android \
-              -keypass android \
-              -dname "CN=MobileFTP, OU=Dev, O=MobileFTP, L=Unknown, ST=Unknown, C=US"
-            echo "⚠️  No KEYSTORE_BASE64 secret found — using auto-generated keystore"
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is not set. Add the release keystore secrets (see README → Required repository secrets). Refusing to publish an APK signed with a throwaway key."
+            exit 1
           fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "${{ github.workspace }}/release.keystore"
+          echo "✅ Decoded release keystore from secrets"
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
 
@@ -282,8 +281,10 @@ jobs:
         id: apk
         run: |
           APK_SRC="app/build/outputs/apk/release/app-release.apk"
+          # An unsigned APK can't be installed at all, so never publish one.
           if [ ! -f "$APK_SRC" ]; then
-            APK_SRC="app/build/outputs/apk/release/app-release-unsigned.apk"
+            echo "::error::Signed APK not found at $APK_SRC (signing was skipped). Check the keystore secrets."
+            exit 1
           fi
           APK_DEST="${{ steps.version.outputs.apk_name }}"
           cp "$APK_SRC" "$APK_DEST"
