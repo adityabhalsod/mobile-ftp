@@ -395,9 +395,9 @@ Push to main / beta / alpha
 │  3. Set up Android SDK                           │
 │  4. Cache Gradle dependencies                    │
 │  5. Determine version + build number             │
-│  6. Inject versionCode = commits-since-last-tag  │
+│  6. Inject versionCode = total commit count      │
 │  7. Generate categorized changelog from commits  │
-│  8. Decode keystore (or auto-generate temp one)  │
+│  8. Decode keystore from secrets (fail if unset) │
 │  9. ./gradlew assembleRelease (-x lint -x test)  │
 │ 10. Rename APK → mobileftp-vX.Y.Z.apk            │
 │ 11. Upload as workflow artifact (30 days)        │
@@ -428,8 +428,10 @@ Commits are categorized by their conventional-commit prefix:
 
 ### Required repository secrets
 
-All of these are **optional**. Without them, CI auto-generates a temporary
-keystore so every build is at least installable.
+All four are **required**. The release job fails if `KEYSTORE_BASE64` is
+missing. Android only installs an update when it is signed with the same key
+as the installed app. A key generated per CI run would make every release
+fail to install over the previous one with "App not installed".
 
 | Secret | Description |
 |---|---|
@@ -437,6 +439,18 @@ keystore so every build is at least installable.
 | `KEYSTORE_PASSWORD` | Keystore password |
 | `KEY_ALIAS` | Signing key alias |
 | `KEY_PASSWORD` | Signing key password |
+
+Create the keystore once and keep a backup outside the repo. If you lose it,
+you can't publish updates that install over existing installs.
+
+```bash
+keytool -genkeypair -v -keystore mobileftp-release.jks -alias release \
+  -keyalg RSA -keysize 2048 -validity 10000
+base64 -w0 mobileftp-release.jks | gh secret set KEYSTORE_BASE64
+gh secret set KEYSTORE_PASSWORD   # prompts for the value
+gh secret set KEY_ALIAS --body release
+gh secret set KEY_PASSWORD        # prompts for the value
+```
 
 ### Manual release
 
